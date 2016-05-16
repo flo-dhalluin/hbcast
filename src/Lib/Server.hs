@@ -36,7 +36,9 @@ data NodeState = NodeState
 -- outgoing part
 chanForwader st chan = do
   yield $ AddrAck $ nodeStatePeer st
-  forever $ liftIO (atomically $ readTChan chan) >>= yield
+  forever $ do
+    msg <- liftIO $ atomically $ readTChan chan
+    yield msg
 
 -- incoming part : too much liftIO in there
 handleNode st peerInfo =  awaitForever $ \msg ->
@@ -54,14 +56,13 @@ handleNode st peerInfo =  awaitForever $ \msg ->
         where
            connectToUnk p = do
              known <- readTVarIO $ nodeStatePool st
-             -- todo , aslo exclude self
-             when (Map.notMember (peerId p) known) (bootstrap st p)
+             when (peerId p /= (peerId $ nodeStatePeer st)) $
+               when (Map.notMember (peerId p) known) $ (bootstrap st p)
 
       Ping -> do
-        p <- liftIO rpeer
-        whenJust p $ \peer -> do
-          liftIO $ print $ "Ping from " ++ (show $ remotePeerInfo peer)
-          liftIO $ atomically $ writeTChan (remotePeerChan peer) Pong
+        peer <- liftM fromJust $ liftIO rpeer
+        liftIO $ print $ "Ping from " ++ (show $ remotePeerInfo peer)
+        liftIO $ atomically $ writeTChan (remotePeerChan peer) Pong
 
       otherwise -> return ()
 
@@ -77,11 +78,15 @@ handler st ad =
     (incoming_, msg) <- incoming $$+ await
     case msg of
       Just (Addr p) ->  do
+
             chan <- newTChanIO
             atomically $ modifyTVar (nodeStatePool st) $ Map.insert (peerId p) (RemotePeer chan p)
-            forkIO $ chanForwader st chan $$ outcoming
+            forkIO $ (chanForwader st chan $$ outcoming) >> (print "connction lost")
             incoming_ $$++ handleNode st p
             closeResumableSource incoming_
+
+            -- remove peer from the finger table
+
 
 bootstrap :: NodeState -> Peer -> IO ()
 bootstrap nodeState peer = let

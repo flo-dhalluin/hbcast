@@ -10,7 +10,7 @@ import qualified Data.Map as Map
 import Data.Serialize (get, put)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Extra (whenJust)
-import Control.Monad (forever, liftM)
+import Control.Monad (forever, liftM, when)
 
 import Control.Concurrent (forkIO, threadDelay)
 
@@ -50,6 +50,13 @@ handleNode st peerInfo =  awaitForever $ \msg ->
           book <- liftIO $ readTVarIO $ nodeStatePool st
           liftIO $ atomically $ writeTChan (remotePeerChan peer) $ AddressesBook (map remotePeerInfo $ Map.elems book)
 
+      AddressesBook book -> liftIO $ mapM_ connectToUnk book
+        where
+           connectToUnk p = do
+             known <- readTVarIO $ nodeStatePool st
+             -- todo , aslo exclude self
+             when (Map.notMember (peerId p) known) (bootstrap st p)
+
       Ping -> do
         p <- liftIO rpeer
         whenJust p $ \peer -> do
@@ -80,7 +87,7 @@ bootstrap :: NodeState -> Peer -> IO ()
 bootstrap nodeState peer = let
     settings = clientSettings (peerPort peer) (peerAddress peer)
   in do
-    putStrLn $ "seeding frmo " ++ (show peer)
+    putStrLn $ "connecting to " ++ (show peer)
     runTCPClient settings $ \ ad -> let
         outcoming = (conduitPut put) =$= appSink ad
         incoming = (appSource ad) =$= (conduitGet2 get)
@@ -93,12 +100,14 @@ bootstrap nodeState peer = let
             chan <- newTChanIO
             atomically $ modifyTVar (nodeStatePool nodeState) $ Map.insert (peerId peerinfo) (RemotePeer chan peerinfo)
             forkIO $ chanForwader nodeState chan $$ (conduitPut put) =$= appSink ad
+            -- ask for address book immediately
+            atomically $ writeTChan chan Addresses
             incoming_ $$+- handleNode nodeState peerinfo
 
 
 pingLoop :: NodeState -> IO ()
 pingLoop st = do
-  threadDelay 1000000
+  threadDelay 5000000
   pool <- readTVarIO $ nodeStatePool st
   mapM_ (\p -> atomically $ writeTChan (remotePeerChan p) Ping) pool
   pingLoop st
